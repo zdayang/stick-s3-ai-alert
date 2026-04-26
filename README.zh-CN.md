@@ -6,6 +6,21 @@
 
 [English README](README.md)
 
+## 当前固件范围
+
+这个仓库目前编译出来的是完整的 StickS3 mini launcher 固件，不是只包含 AI Alert 的单功能固件。
+
+当前固件包含：
+
+- `AI Alert`
+- `Dodge`
+- `Stone`
+- `MineZ`
+- `Settings`
+- `Info`
+
+`AI Alert` 是主功能，小游戏和设置界面作为当前 playground 风格固件的一部分保留。
+
 ## 功能
 
 - 竖屏 StickS3 小启动器，包含多个 App。

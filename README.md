@@ -6,6 +6,21 @@ The device can show alerts from Codex and Claude Code over BLE. It is designed t
 
 [中文说明](README.zh-CN.md)
 
+## Current Firmware Scope
+
+This repository currently builds the full StickS3 mini launcher firmware, not an AI Alert-only image.
+
+The compiled firmware includes:
+
+- `AI Alert`
+- `Dodge`
+- `Stone`
+- `MineZ`
+- `Settings`
+- `Info`
+
+`AI Alert` is the main feature, while the games and settings screens are kept as part of the current playground-style firmware.
+
 ## Features
 
 - Vertical StickS3 launcher with multiple apps.
