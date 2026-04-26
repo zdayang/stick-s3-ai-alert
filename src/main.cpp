@@ -680,6 +680,8 @@ void startCodexAlertBle() {
   alert_advertising = BLEDevice::getAdvertising();
   alert_advertising->addServiceUUID(ALERT_SERVICE_UUID);
   alert_advertising->setScanResponse(true);
+  alert_advertising->setMinInterval(0x0640);
+  alert_advertising->setMaxInterval(0x0800);
   alert_advertising->setMinPreferred(0x06);
   alert_advertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
@@ -1555,6 +1557,7 @@ void handleIdlePower() {
 void setup() {
   Serial.begin(115200);
   delay(300);
+  setCpuFrequencyMhz(80);
 
   auto cfg = M5.config();
   cfg.fallback_board = m5::board_t::board_M5StickS3;
@@ -1658,7 +1661,7 @@ void loop() {
 
   handleIdlePower();
   if (mode == ScreenMode::Alert && !alert.active && !alert.screen_on && !alert.showing_last) {
-    delay(35);
+    delay(150);
   } else {
     delay(5);
   }
