@@ -1,0 +1,29 @@
+.DS_Store
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Arduino CLI local cache
+.arduino/
+arduino-cli.yaml
+
+# Local tools and binaries
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and local secrets
+*.log
+*.local
+*.secret
+*.env
+
+# Editor files
+.idea/
+.vscode/
