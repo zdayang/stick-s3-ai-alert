@@ -17,7 +17,6 @@ The compiled firmware includes:
 - `Stone`
 - `MineZ`
 - `Settings`
-- `Info`
 
 `AI Alert` is the main feature, while the games and settings screens are kept as part of the current playground-style firmware.
 

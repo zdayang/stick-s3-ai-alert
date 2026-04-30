@@ -17,7 +17,6 @@
 - `Stone`
 - `MineZ`
 - `Settings`
-- `Info`
 
 `AI Alert` 是主功能，小游戏和设置界面作为当前 playground 风格固件的一部分保留。
 

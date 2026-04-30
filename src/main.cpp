@@ -15,7 +15,7 @@ static constexpr int CONTENT_Y = STATUS_H;
 static constexpr int CONTENT_H = SCREEN_H - STATUS_H - HINT_H;
 static constexpr int HINT_Y = SCREEN_H - HINT_H;
 
-enum class ScreenMode { Home, Settings, Dodge, Stone, Mine, Alert, Info };
+enum class ScreenMode { Home, Settings, Dodge, Stone, Mine, Alert };
 
 struct Settings {
   uint8_t brightness = 40;
@@ -151,7 +151,7 @@ static BLEAdvertising* alert_advertising = nullptr;
 static volatile bool alert_rx_pending = false;
 static char alert_rx_message[48] = {0};
 
-static const char* app_names[] = {"AI Alert", "Dodge", "Stone", "MineZ", "Settings", "Info"};
+static const char* app_names[] = {"AI Alert", "Dodge", "Stone", "MineZ", "Settings"};
 static constexpr uint8_t app_count = sizeof(app_names) / sizeof(app_names[0]);
 static const char* setting_names[] = {"Bright", "Volume", "WiFi", "BLE", "Sleep"};
 static constexpr uint8_t setting_count = sizeof(setting_names) / sizeof(setting_names[0]);
@@ -196,6 +196,11 @@ void applyCapabilities(Capabilities next) {
   if (!next.ble && active_caps.ble) {
     stopCodexAlertBle();
     btStop();
+  }
+
+  if (!next.speaker && active_caps.speaker) {
+    M5.Speaker.stop();
+    M5.Speaker.setVolume(0);
   }
 
   active_caps = next;
@@ -393,7 +398,9 @@ void changeCurrentSetting() {
       break;
     case 1:
       settings.volume = settings.volume >= 100 ? 0 : settings.volume + 20;
-      M5.Speaker.setVolume(settings.volume);
+      if (active_caps.speaker) {
+        M5.Speaker.setVolume(settings.volume);
+      }
       break;
     case 2:
       settings.wifi = !settings.wifi;
@@ -406,23 +413,8 @@ void changeCurrentSetting() {
       break;
   }
   saveSettings();
-  applyCapabilities(caps(settings.wifi, settings.ble, false, settings.volume > 0));
+  applyCapabilities(caps(settings.wifi, settings.ble, false, false));
   drawSettings();
-}
-
-void drawInfo() {
-  drawStatus("INFO");
-  clearContent();
-  drawHint("AB HOME");
-
-  M5.Display.setFont(&fonts::Font2);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setCursor(10, CONTENT_Y + 18);
-  M5.Display.print("StickS3 Mini");
-  M5.Display.setCursor(10, CONTENT_Y + 48);
-  M5.Display.printf("Board: %d", static_cast<int>(M5.getBoard()));
-  M5.Display.setCursor(10, CONTENT_Y + 76);
-  M5.Display.printf("Bat: %d%%", M5.Power.getBatteryLevel());
 }
 
 void cleanAlertField(const char* raw, char* dest, size_t size) {
@@ -514,6 +506,7 @@ void clearAlert() {
   alert.flash_on = false;
   alert.pending_draw = false;
   M5.Speaker.stop();
+  M5.Speaker.setVolume(0);
   M5.Display.setBrightness(0);
   M5.Display.fillScreen(TFT_BLACK);
 }
@@ -701,7 +694,8 @@ void stopCodexAlertBle() {
 }
 
 void enterAlert() {
-  applyCapabilities(caps(false, true, false, settings.volume > 0));
+  applyCapabilities(caps(false, true, false, true));
+  M5.Speaker.setVolume(settings.volume);
   startCodexAlertBle();
   alert.active = false;
   alert.showing_last = false;
@@ -828,7 +822,7 @@ void drawDodgeFrame() {
 }
 
 void enterDodge() {
-  applyCapabilities(caps(false, false, true, settings.volume > 0));
+  applyCapabilities(caps(false, false, true, false));
   resetDodge();
   drawStatus("DODGE");
   drawHint("A GO B LVL AB");
@@ -1085,7 +1079,7 @@ void drawStoneGame() {
 }
 
 void enterStone() {
-  applyCapabilities(caps(false, false, true, settings.volume > 0));
+  applyCapabilities(caps(false, false, true, false));
   loadStoneLevel(stone_game.level);
   drawStatus("STONE");
   drawHint("A UND B RST AB");
@@ -1344,7 +1338,7 @@ void drawMineGame() {
 }
 
 void enterMine() {
-  applyCapabilities(caps(false, false, true, settings.volume > 0));
+  applyCapabilities(caps(false, false, true, false));
   resetMine();
   drawStatus("MINE");
   drawHint("A ACT B PUT AB");
@@ -1516,7 +1510,9 @@ void updateMine() {
 
 void enterHome() {
   mode = ScreenMode::Home;
-  applyCapabilities(caps(settings.wifi, settings.ble, false, settings.volume > 0));
+  applyCapabilities(caps(settings.wifi, settings.ble, false, false));
+  M5.Speaker.stop();
+  M5.Speaker.setVolume(0);
   drawHome();
 }
 
@@ -1535,12 +1531,10 @@ void openSelectedApp() {
     enterMine();
   } else if (home_index == 4) {
     mode = ScreenMode::Settings;
-    applyCapabilities(caps(settings.wifi, settings.ble, false, settings.volume > 0));
+    applyCapabilities(caps(settings.wifi, settings.ble, false, false));
+    M5.Speaker.stop();
+    M5.Speaker.setVolume(0);
     drawSettings();
-  } else {
-    mode = ScreenMode::Info;
-    applyCapabilities(caps(false, false, false, false));
-    drawInfo();
   }
 }
 
@@ -1570,11 +1564,12 @@ void setup() {
 
   loadSettings();
   setBrightness(settings.brightness);
-  M5.Speaker.setVolume(settings.volume);
+  M5.Speaker.stop();
+  M5.Speaker.setVolume(0);
   randomSeed(static_cast<uint32_t>(esp_random()));
   last_input_ms = millis();
 
-  applyCapabilities(caps(settings.wifi, settings.ble, false, settings.volume > 0));
+  applyCapabilities(caps(settings.wifi, settings.ble, false, false));
   enterHome();
 }
 
@@ -1641,21 +1636,6 @@ void loop() {
         break;
       }
       updateAlert();
-      break;
-
-    case ScreenMode::Info:
-      if (M5.BtnA.wasHold()) {
-        enterHome();
-        break;
-      }
-      if (M5.BtnB.wasHold() || M5.BtnB.wasClicked()) {
-        enterHome();
-        break;
-      }
-      if (millis() - last_status_ms > 2000) {
-        last_status_ms = millis();
-        drawInfo();
-      }
       break;
   }
 
