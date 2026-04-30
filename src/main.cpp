@@ -1608,7 +1608,7 @@ void handleIdlePower() {
     return;
   }
   if (!dimmed && settings.sleep_seconds > 0 && millis() - last_input_ms > static_cast<uint32_t>(settings.sleep_seconds) * 1000UL) {
-    M5.Display.setBrightness(5);
+    M5.Display.setBrightness(0);
     dimmed = true;
   }
 }
@@ -1708,6 +1708,8 @@ void loop() {
   handleIdlePower();
   if (mode == ScreenMode::Alert && !alert.active && !alert.screen_on && !alert.showing_last) {
     delay(150);
+  } else if (mode == ScreenMode::Home || mode == ScreenMode::Settings) {
+    delay(90);
   } else {
     delay(5);
   }
