@@ -14,6 +14,7 @@ The compiled firmware includes:
 
 - `AI Alert`
 - `Dodge`
+- `Brick`
 - `Stone`
 - `MineZ`
 - `Settings`

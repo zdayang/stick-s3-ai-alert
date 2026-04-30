@@ -14,6 +14,7 @@
 
 - `AI Alert`
 - `Dodge`
+- `Brick`
 - `Stone`
 - `MineZ`
 - `Settings`

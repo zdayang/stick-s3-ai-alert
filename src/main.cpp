@@ -15,7 +15,7 @@ static constexpr int CONTENT_Y = STATUS_H;
 static constexpr int CONTENT_H = SCREEN_H - STATUS_H - HINT_H;
 static constexpr int HINT_Y = SCREEN_H - HINT_H;
 
-enum class ScreenMode { Home, Settings, Dodge, Stone, Mine, Alert };
+enum class ScreenMode { Home, Settings, Dodge, Brick, Stone, Mine, Alert };
 
 struct Settings {
   uint8_t brightness = 40;
@@ -51,6 +51,25 @@ struct DodgeState {
   float obstacle_y = CONTENT_Y;
   uint32_t last_frame_ms = 0;
   uint32_t last_score_ms = 0;
+};
+
+struct BrickState {
+  bool running = false;
+  bool lost = false;
+  bool cleared = false;
+  bool win = false;
+  uint8_t level = 0;
+  int score = 0;
+  float paddle_x = SCREEN_W / 2.0f;
+  float ball_x = SCREEN_W / 2.0f;
+  float ball_y = CONTENT_Y + 154;
+  float ball_vx = 1.4f;
+  float ball_vy = -1.8f;
+  uint8_t bricks[5][7] = {{0}};
+  uint8_t brick_count = 0;
+  uint32_t last_frame_ms = 0;
+  uint32_t wide_until_ms = 0;
+  uint32_t cleared_at_ms = 0;
 };
 
 struct StepDir {
@@ -145,6 +164,7 @@ static bool dimmed = false;
 static bool combo_was_down = false;
 static bool pm1_ldo_enabled = true;
 static DodgeState dodge;
+static BrickState brick;
 static StoneState stone_game;
 static MineState mine;
 static AlertState alert;
@@ -153,7 +173,7 @@ static BLEAdvertising* alert_advertising = nullptr;
 static volatile bool alert_rx_pending = false;
 static char alert_rx_message[48] = {0};
 
-static const char* app_names[] = {"AI Alert", "Dodge", "Stone", "MineZ", "Settings"};
+static const char* app_names[] = {"AI Alert", "Dodge", "Brick", "Stone", "MineZ", "Settings"};
 static constexpr uint8_t app_count = sizeof(app_names) / sizeof(app_names[0]);
 static const char* setting_names[] = {"Bright", "Volume", "WiFi", "BLE", "Sleep"};
 static constexpr uint8_t setting_count = sizeof(setting_names) / sizeof(setting_names[0]);
@@ -284,6 +304,15 @@ bool comboPressedOnce(uint32_t ms) {
   bool fired = down && !combo_was_down;
   combo_was_down = down;
   return fired;
+}
+
+void playCue(uint16_t freq, uint16_t duration_ms) {
+  if (settings.volume == 0) return;
+  setSpeakerPower(true);
+  M5.Speaker.tone(freq, duration_ms);
+  delay(duration_ms + 20);
+  setSpeakerPower(false);
+  applyIdleLdoPolicy();
 }
 
 StepDir readTiltStep(float threshold = 0.38f) {
@@ -964,6 +993,278 @@ void updateDodge() {
   drawDodgeFrame();
 }
 
+static constexpr uint8_t BRICK_ROWS = 5;
+static constexpr uint8_t BRICK_COLS = 7;
+static constexpr int BRICK_W = 17;
+static constexpr int BRICK_H = 10;
+static constexpr int BRICK_GAP = 2;
+static constexpr int BRICK_X0 = 1;
+static constexpr int BRICK_Y0 = 22;
+static constexpr int BALL_R = 3;
+static constexpr int PADDLE_Y = CONTENT_H - 18;
+
+float brickBallSpeed() {
+  return 2.0f + brick.level * 0.38f;
+}
+
+int brickPaddleW() {
+  return millis() < brick.wide_until_ms ? 54 : max(28, 44 - brick.level * 3);
+}
+
+void resetBrickBall() {
+  brick.ball_x = SCREEN_W / 2.0f;
+  brick.ball_y = CONTENT_Y + 150;
+  float speed = brickBallSpeed();
+  brick.ball_vx = random(0, 2) ? speed * 0.62f : -speed * 0.62f;
+  brick.ball_vy = -speed;
+  brick.paddle_x = SCREEN_W / 2.0f;
+  brick.last_frame_ms = millis();
+}
+
+uint16_t brickColor(uint8_t type, uint8_t row) {
+  if (type == 2) return TFT_RED;
+  if (type == 3) return TFT_CYAN;
+  static const uint16_t colors[] = {TFT_ORANGE, TFT_YELLOW, TFT_GREEN, TFT_SKYBLUE, TFT_MAGENTA};
+  return colors[row % 5];
+}
+
+void generateBrickLevel(uint8_t level) {
+  memset(brick.bricks, 0, sizeof(brick.bricks));
+  brick.level = level % 5;
+  brick.running = false;
+  brick.lost = false;
+  brick.cleared = false;
+  brick.win = false;
+  brick.score = 0;
+  brick.brick_count = 0;
+  brick.wide_until_ms = 0;
+  brick.cleared_at_ms = 0;
+
+  uint8_t rows = min<uint8_t>(BRICK_ROWS, 2 + brick.level);
+  uint8_t fill = 52 + brick.level * 10;
+  for (uint8_t y = 0; y < rows; ++y) {
+    for (uint8_t x = 0; x < BRICK_COLS; ++x) {
+      bool edge_keep = brick.level < 2 && (x == 0 || x == BRICK_COLS - 1);
+      if (!edge_keep && random(100) < fill) {
+        brick.bricks[y][x] = 1;
+        brick.brick_count++;
+      }
+    }
+  }
+
+  uint8_t min_count = 7 + brick.level * 5;
+  while (brick.brick_count < min_count) {
+    uint8_t x = random(BRICK_COLS);
+    uint8_t y = random(rows);
+    if (brick.bricks[y][x] == 0) {
+      brick.bricks[y][x] = 1;
+      brick.brick_count++;
+    }
+  }
+
+  uint8_t bomb_count = 1 + brick.level / 2;
+  uint8_t wide_count = brick.level < 2 ? 1 : 2;
+  for (uint8_t i = 0; i < bomb_count + wide_count; ++i) {
+    for (uint8_t tries = 0; tries < 20; ++tries) {
+      uint8_t x = random(BRICK_COLS);
+      uint8_t y = random(rows);
+      if (brick.bricks[y][x] == 1) {
+        brick.bricks[y][x] = i < bomb_count ? 2 : 3;
+        break;
+      }
+    }
+  }
+  resetBrickBall();
+}
+
+void drawBrickGame() {
+  game_canvas.fillSprite(TFT_BLACK);
+  game_canvas.drawRect(0, 0, SCREEN_W, CONTENT_H, TFT_DARKGREY);
+  game_canvas.setFont(&fonts::Font0);
+  game_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+  game_canvas.setCursor(4, 4);
+  game_canvas.printf("L:%d  left:%d", brick.level + 1, brick.brick_count);
+
+  for (uint8_t y = 0; y < BRICK_ROWS; ++y) {
+    for (uint8_t x = 0; x < BRICK_COLS; ++x) {
+      uint8_t type = brick.bricks[y][x];
+      if (type == 0) continue;
+      int bx = BRICK_X0 + x * (BRICK_W + BRICK_GAP);
+      int by = BRICK_Y0 + y * (BRICK_H + BRICK_GAP);
+      uint16_t color = brickColor(type, y);
+      game_canvas.fillRoundRect(bx, by, BRICK_W, BRICK_H, 2, color);
+      if (type == 2) {
+        game_canvas.setTextColor(TFT_WHITE, color);
+        game_canvas.setCursor(bx + 6, by + 1);
+        game_canvas.print("*");
+      } else if (type == 3) {
+        game_canvas.setTextColor(TFT_BLACK, color);
+        game_canvas.setCursor(bx + 5, by + 1);
+        game_canvas.print("W");
+      }
+    }
+  }
+
+  int paddle_w = brickPaddleW();
+  int px = static_cast<int>(brick.paddle_x) - paddle_w / 2;
+  game_canvas.fillRoundRect(px, PADDLE_Y, paddle_w, 8, 4, TFT_GREEN);
+  game_canvas.fillCircle(static_cast<int>(brick.ball_x), static_cast<int>(brick.ball_y) - CONTENT_Y, BALL_R, TFT_WHITE);
+
+  if (!brick.running) {
+    game_canvas.setFont(&fonts::Font2);
+    uint16_t color = brick.lost ? TFT_RED : brick.cleared || brick.win ? TFT_CYAN : TFT_YELLOW;
+    const char* label = brick.win ? "WIN" : brick.cleared ? "CLEAR" : brick.lost ? "MISS" : "READY";
+    game_canvas.setTextColor(color, TFT_BLACK);
+    game_canvas.setCursor(strcmp(label, "CLEAR") == 0 ? 36 : 44, CONTENT_H / 2 + 20);
+    game_canvas.print(label);
+  }
+
+  game_canvas.pushSprite(0, CONTENT_Y);
+}
+
+void triggerBrickBomb(uint8_t hit_x, uint8_t hit_y) {
+  for (int y = max<int>(0, hit_y - 1); y <= min<int>(BRICK_ROWS - 1, hit_y + 1); ++y) {
+    for (int x = max<int>(0, hit_x - 1); x <= min<int>(BRICK_COLS - 1, hit_x + 1); ++x) {
+      if (brick.bricks[y][x]) {
+        brick.bricks[y][x] = 0;
+        if (brick.brick_count > 0) brick.brick_count--;
+      }
+    }
+  }
+  playCue(988, 90);
+}
+
+void hitBrick(uint8_t x, uint8_t y) {
+  uint8_t type = brick.bricks[y][x];
+  if (type == 0) return;
+  brick.bricks[y][x] = 0;
+  if (brick.brick_count > 0) brick.brick_count--;
+  brick.score += 10;
+
+  if (type == 2) {
+    triggerBrickBomb(x, y);
+  } else if (type == 3) {
+    brick.wide_until_ms = millis() + 8000;
+    playCue(1319, 80);
+  }
+
+  if (brick.brick_count == 0) {
+    brick.running = false;
+    brick.cleared = true;
+    brick.cleared_at_ms = millis();
+    playCue(1568, 110);
+  }
+}
+
+void enterBrick() {
+  applyCapabilities(caps(false, false, true, false));
+  generateBrickLevel(brick.level);
+  drawStatus("BRICK");
+  drawHint("A GO B RST AB");
+  drawBrickGame();
+}
+
+void updateBrick() {
+  if (M5.BtnA.wasPressed()) {
+    if (brick.lost || brick.win) {
+      generateBrickLevel(brick.win ? 0 : brick.level);
+    }
+    if (!brick.cleared) {
+      brick.running = !brick.running;
+      brick.lost = false;
+    }
+    drawHint(brick.running ? "A PAU B RST AB" : "A GO B RST AB");
+    drawBrickGame();
+  }
+
+  if (M5.BtnB.wasPressed()) {
+    generateBrickLevel(brick.level);
+    drawBrickGame();
+    return;
+  }
+
+  if (brick.cleared && millis() - brick.cleared_at_ms > 900) {
+    if (brick.level >= 4) {
+      brick.win = true;
+      brick.cleared = false;
+      drawBrickGame();
+    } else {
+      generateBrickLevel(brick.level + 1);
+      drawBrickGame();
+    }
+    return;
+  }
+
+  if (!brick.running) return;
+
+  uint32_t now = millis();
+  if (now - brick.last_frame_ms < 25) return;
+  brick.last_frame_ms = now;
+
+  if (M5.Imu.update()) {
+    float ax = 0, ay = 0, az = 0;
+    M5.Imu.getAccel(&ax, &ay, &az);
+    brick.paddle_x -= ay * 8.0f;
+  }
+  int paddle_w = brickPaddleW();
+  if (brick.paddle_x < paddle_w / 2) brick.paddle_x = paddle_w / 2;
+  if (brick.paddle_x > SCREEN_W - paddle_w / 2) brick.paddle_x = SCREEN_W - paddle_w / 2;
+
+  brick.ball_x += brick.ball_vx;
+  brick.ball_y += brick.ball_vy;
+  if (brick.ball_x < BALL_R) {
+    brick.ball_x = BALL_R;
+    brick.ball_vx = fabsf(brick.ball_vx);
+  } else if (brick.ball_x > SCREEN_W - BALL_R) {
+    brick.ball_x = SCREEN_W - BALL_R;
+    brick.ball_vx = -fabsf(brick.ball_vx);
+  }
+  if (brick.ball_y < CONTENT_Y + BALL_R) {
+    brick.ball_y = CONTENT_Y + BALL_R;
+    brick.ball_vy = fabsf(brick.ball_vy);
+  }
+
+  int local_y = static_cast<int>(brick.ball_y) - CONTENT_Y;
+  int paddle_left = static_cast<int>(brick.paddle_x) - paddle_w / 2;
+  int paddle_right = paddle_left + paddle_w;
+  bool hits_paddle = brick.ball_vy > 0 && local_y + BALL_R >= PADDLE_Y && local_y - BALL_R <= PADDLE_Y + 8 &&
+                     brick.ball_x >= paddle_left && brick.ball_x <= paddle_right;
+  if (hits_paddle) {
+    float offset = (brick.ball_x - brick.paddle_x) / (paddle_w / 2.0f);
+    float speed = brickBallSpeed();
+    brick.ball_vx = offset * speed * 0.9f;
+    brick.ball_vy = -speed;
+    brick.ball_y = CONTENT_Y + PADDLE_Y - BALL_R - 1;
+  }
+
+  for (uint8_t y = 0; y < BRICK_ROWS; ++y) {
+    for (uint8_t x = 0; x < BRICK_COLS; ++x) {
+      if (brick.bricks[y][x] == 0) continue;
+      int bx = BRICK_X0 + x * (BRICK_W + BRICK_GAP);
+      int by = CONTENT_Y + BRICK_Y0 + y * (BRICK_H + BRICK_GAP);
+      bool overlap = brick.ball_x + BALL_R >= bx && brick.ball_x - BALL_R <= bx + BRICK_W &&
+                     brick.ball_y + BALL_R >= by && brick.ball_y - BALL_R <= by + BRICK_H;
+      if (overlap) {
+        hitBrick(x, y);
+        brick.ball_vy = -brick.ball_vy;
+        y = BRICK_ROWS;
+        break;
+      }
+    }
+  }
+
+  if (brick.ball_y > HINT_Y - BALL_R) {
+    brick.running = false;
+    brick.lost = true;
+    playCue(330, 140);
+    resetBrickBall();
+    drawHint("A TRY B RST AB");
+  }
+
+  drawStatus("BRICK");
+  drawBrickGame();
+}
+
 static constexpr int STONE_W = 5;
 static constexpr int STONE_H = 7;
 static constexpr int STONE_TILE = 24;
@@ -1591,12 +1892,15 @@ void openSelectedApp() {
     mode = ScreenMode::Dodge;
     enterDodge();
   } else if (home_index == 2) {
+    mode = ScreenMode::Brick;
+    enterBrick();
+  } else if (home_index == 3) {
     mode = ScreenMode::Stone;
     enterStone();
-  } else if (home_index == 3) {
+  } else if (home_index == 4) {
     mode = ScreenMode::Mine;
     enterMine();
-  } else if (home_index == 4) {
+  } else if (home_index == 5) {
     mode = ScreenMode::Settings;
     applyCapabilities(caps(false, false, false, false));
     drawSettings();
@@ -1686,6 +1990,10 @@ void loop() {
 
     case ScreenMode::Dodge:
       updateDodge();
+      break;
+
+    case ScreenMode::Brick:
+      updateBrick();
       break;
 
     case ScreenMode::Stone:
