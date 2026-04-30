@@ -126,6 +126,7 @@ struct AlertState {
   uint32_t last_flash_ms = 0;
   uint32_t idle_preview_until_ms = 0;
   uint32_t alert_hide_at_ms = 0;
+  uint32_t speaker_off_at_ms = 0;
   uint8_t beep_count = 0;
   uint8_t flash_count = 0;
   bool flash_on = false;
@@ -142,6 +143,7 @@ static uint32_t last_input_ms = 0;
 static uint32_t last_status_ms = 0;
 static bool dimmed = false;
 static bool combo_was_down = false;
+static bool pm1_ldo_enabled = true;
 static DodgeState dodge;
 static StoneState stone_game;
 static MineState mine;
@@ -159,6 +161,13 @@ static const char* ALERT_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 static const char* ALERT_RX_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
 static constexpr uint8_t ALERT_BEEP_COUNT = 3;
 static constexpr uint8_t ALERT_FLASH_TOGGLES = ALERT_BEEP_COUNT * 2;
+static constexpr uint8_t PM1_ADDR = 0x6E;
+static constexpr uint8_t PM1_REG_PWR_CFG = 0x06;
+static constexpr uint8_t PM1_REG_GPIO_MODE = 0x10;
+static constexpr uint8_t PM1_REG_GPIO_OUT = 0x11;
+static constexpr uint8_t PM1_REG_GPIO_DRV = 0x13;
+static constexpr uint8_t PM1_REG_GPIO_FUNC = 0x16;
+static constexpr uint8_t PM1_SPK_GPIO = 3;
 
 void stopCodexAlertBle();
 
@@ -184,6 +193,59 @@ void setBrightness(uint8_t value) {
   dimmed = false;
 }
 
+void pm1SetBit(uint8_t reg, uint8_t mask, bool on) {
+  if (on) {
+    M5.In_I2C.bitOn(PM1_ADDR, reg, mask, 100000);
+  } else {
+    M5.In_I2C.bitOff(PM1_ADDR, reg, mask, 100000);
+  }
+}
+
+void setPeripheralLdo(bool enable) {
+  if (pm1_ldo_enabled == enable) return;
+  pm1SetBit(PM1_REG_PWR_CFG, 1 << 2, enable);
+  pm1_ldo_enabled = enable;
+  if (enable) {
+    delay(10);
+  }
+}
+
+void setSpeakerPower(bool enable) {
+  if (enable && active_caps.speaker) return;
+
+  if (enable) {
+    setPeripheralLdo(true);
+    pm1SetBit(PM1_REG_GPIO_FUNC, 1 << PM1_SPK_GPIO, false);
+    pm1SetBit(PM1_REG_GPIO_MODE, 1 << PM1_SPK_GPIO, true);
+    pm1SetBit(PM1_REG_GPIO_DRV, 1 << PM1_SPK_GPIO, false);
+    pm1SetBit(PM1_REG_GPIO_OUT, 1 << PM1_SPK_GPIO, true);
+    M5.Speaker.begin();
+    M5.Speaker.setVolume(settings.volume);
+  } else {
+    M5.Speaker.stop();
+    M5.Speaker.end();
+    pm1SetBit(PM1_REG_GPIO_OUT, 1 << PM1_SPK_GPIO, false);
+  }
+  active_caps.speaker = enable;
+}
+
+void setImuPower(bool enable) {
+  if (enable == active_caps.imu) return;
+  if (enable) {
+    setPeripheralLdo(true);
+    M5.Imu.begin(&M5.In_I2C, M5.getBoard());
+  } else {
+    M5.Imu.sleep();
+  }
+  active_caps.imu = enable;
+}
+
+void applyIdleLdoPolicy() {
+  if (!active_caps.imu && !active_caps.speaker) {
+    setPeripheralLdo(false);
+  }
+}
+
 void applyCapabilities(Capabilities next) {
   if (!next.wifi && active_caps.wifi) {
     WiFi.disconnect(true);
@@ -198,12 +260,12 @@ void applyCapabilities(Capabilities next) {
     btStop();
   }
 
-  if (!next.speaker && active_caps.speaker) {
-    M5.Speaker.stop();
-    M5.Speaker.setVolume(0);
-  }
+  setSpeakerPower(next.speaker);
+  setImuPower(next.imu);
 
-  active_caps = next;
+  active_caps.wifi = next.wifi;
+  active_caps.ble = next.ble;
+  applyIdleLdoPolicy();
 }
 
 void wakeDisplay() {
@@ -413,7 +475,7 @@ void changeCurrentSetting() {
       break;
   }
   saveSettings();
-  applyCapabilities(caps(settings.wifi, settings.ble, false, false));
+  applyCapabilities(caps(false, false, false, false));
   drawSettings();
 }
 
@@ -504,9 +566,10 @@ void clearAlert() {
   alert.beep_count = 0;
   alert.flash_count = 0;
   alert.flash_on = false;
+  alert.speaker_off_at_ms = 0;
   alert.pending_draw = false;
-  M5.Speaker.stop();
-  M5.Speaker.setVolume(0);
+  setSpeakerPower(false);
+  applyIdleLdoPolicy();
   M5.Display.setBrightness(0);
   M5.Display.fillScreen(TFT_BLACK);
 }
@@ -614,7 +677,14 @@ void pulseAlert(uint32_t now) {
   if (alert.beep_count < ALERT_BEEP_COUNT && !alert.muted && settings.volume > 0 && now - alert.last_pulse_ms > 260) {
     alert.last_pulse_ms = now;
     alert.beep_count++;
+    setSpeakerPower(true);
     M5.Speaker.tone(strcmp(alert.state, "ASK") == 0 ? 2093 : 1568, 90);
+    alert.speaker_off_at_ms = now + 140;
+  }
+  if (alert.speaker_off_at_ms > 0 && now > alert.speaker_off_at_ms) {
+    alert.speaker_off_at_ms = 0;
+    setSpeakerPower(false);
+    applyIdleLdoPolicy();
   }
   if (alert.flash_count < ALERT_FLASH_TOGGLES && now - alert.last_flash_ms > 180) {
     alert.last_flash_ms = now;
@@ -694,8 +764,7 @@ void stopCodexAlertBle() {
 }
 
 void enterAlert() {
-  applyCapabilities(caps(false, true, false, true));
-  M5.Speaker.setVolume(settings.volume);
+  applyCapabilities(caps(false, true, false, false));
   startCodexAlertBle();
   alert.active = false;
   alert.showing_last = false;
@@ -1510,9 +1579,7 @@ void updateMine() {
 
 void enterHome() {
   mode = ScreenMode::Home;
-  applyCapabilities(caps(settings.wifi, settings.ble, false, false));
-  M5.Speaker.stop();
-  M5.Speaker.setVolume(0);
+  applyCapabilities(caps(false, false, false, false));
   drawHome();
 }
 
@@ -1531,9 +1598,7 @@ void openSelectedApp() {
     enterMine();
   } else if (home_index == 4) {
     mode = ScreenMode::Settings;
-    applyCapabilities(caps(settings.wifi, settings.ble, false, false));
-    M5.Speaker.stop();
-    M5.Speaker.setVolume(0);
+    applyCapabilities(caps(false, false, false, false));
     drawSettings();
   }
 }
@@ -1555,7 +1620,8 @@ void setup() {
 
   auto cfg = M5.config();
   cfg.fallback_board = m5::board_t::board_M5StickS3;
-  cfg.internal_spk = true;
+  cfg.internal_spk = false;
+  cfg.internal_imu = false;
   cfg.internal_mic = false;
   M5.begin(cfg);
   M5.Display.setRotation(0);
@@ -1564,12 +1630,12 @@ void setup() {
 
   loadSettings();
   setBrightness(settings.brightness);
-  M5.Speaker.stop();
-  M5.Speaker.setVolume(0);
+  setSpeakerPower(false);
+  applyIdleLdoPolicy();
   randomSeed(static_cast<uint32_t>(esp_random()));
   last_input_ms = millis();
 
-  applyCapabilities(caps(settings.wifi, settings.ble, false, false));
+  applyCapabilities(caps(false, false, false, false));
   enterHome();
 }
 
